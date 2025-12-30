@@ -1,962 +1,960 @@
 import os
-from datetime import datetime
+import time
+import random
+import textwrap
+from pathlib import Path
+from typing import Dict, Any, List, Optional
 
 import streamlit as st
 import yaml
-import pandas as pd
-import altair as alt
-from pypdf import PdfReader
 
-# External LLM clients
-from openai import OpenAI
-import google.generativeai as genai
-from anthropic import Anthropic
+# Optional imports – wrapped in try/except in LLM manager
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+try:
+    import anthropic
+except Exception:
+    anthropic = None
+
 import httpx
 
 
-# =========================
-# Constants & configuration
-# =========================
+# ------------- GLOBAL CONSTANTS ------------------------------------------------
 
-ALL_MODELS = [
+APP_TITLE = "FDA 510(k) Agentic Review WOW Studio"
+
+MODEL_OPTIONS = [
     "gpt-4o-mini",
     "gpt-4.1-mini",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
     "gemini-3-flash-preview",
-    "claude-3-5-sonnet-2024-10",
+    "claude-3-5-sonnet-20241022",
     "claude-3-5-haiku-20241022",
     "grok-4-fast-reasoning",
     "grok-3-mini",
 ]
 
-OPENAI_MODELS = {"gpt-4o-mini", "gpt-4.1-mini"}
-GEMINI_MODELS = {"gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3-flash-preview"}
-ANTHROPIC_MODELS = {"claude-3-5-sonnet-20210", "claude-3-5-sonnet-2024-10", "claude-3-5-haiku-20241022"}
-GROK_MODELS = {"grok-4-fast-reasoning", "grok-3-mini"}
-
-PAINTER_STYLES = [
-    "Van Gogh", "Monet", "Picasso", "Da Vinci", "Rembrandt",
-    "Matisse", "Kandinsky", "Hokusai", "Yayoi Kusama", "Frida Kahlo",
-    "Salvador Dali", "Rothko", "Pollock", "Chagall", "Basquiat",
-    "Haring", "Georgia O'Keeffe", "Turner", "Seurat", "Escher"
-]
-
-# Basic localized labels (expand as needed)
-LABELS = {
-    "Dashboard": {"English": "Dashboard", "繁體中文": "儀表板"},
-    "510k_tab": {"English": "510(k) Intelligence", "繁體中文": "510(k) 智能分析"},
-    "PDF → Markdown": {"English": "PDF → Markdown", "繁體中文": "PDF → Markdown"},
-    "Summary & Entities": {"English": "Summary & Entities", "繁體中文": "綜合摘要與實體"},
-    "Comparator": {"English": "Comparator", "繁體中文": "文件版本比較"},
-    "Checklist & Report": {"English": "Checklist & Report", "繁體中文": "審查清單與報告"},
-    "Note Keeper & Magics": {"English": "Note Keeper & Magics", "繁體中文": "筆記助手與魔法"},
-}
-
-# Painter style CSS snippets (simple examples)
-STYLE_CSS = {
-    "Van Gogh": """
-      body { background: radial-gradient(circle at top left, #243B55, #141E30); }
-    """,
-    "Monet": """
-      body { background: linear-gradient(120deg, #a1c4fd, #c2e9fb); }
-    """,
-    "Picasso": """
-      body { background: linear-gradient(135deg, #ff9a9e, #fecfef); }
-    """,
-    "Da Vinci": """
-      body { background: radial-gradient(circle, #f9f1c6, #c9a66b); }
-    """,
-    "Rembrandt": """
-      body { background: radial-gradient(circle, #2c1810, #0b090a); }
-    """,
-    "Matisse": """
-      body { background: linear-gradient(135deg, #ffecd2, #fcb69f); }
-    """,
-    "Kandinsky": """
-      body { background: linear-gradient(135deg, #00c6ff, #0072ff); }
-    """,
-    "Hokusai": """
-      body { background: linear-gradient(135deg, #2b5876, #4e4376); }
-    """,
-    "Yayoi Kusama": """
-      body { background: radial-gradient(circle, #ffdd00, #ff6a00); }
-    """,
-    "Frida Kahlo": """
-      body { background: linear-gradient(135deg, #f8b195, #f67280, #c06c84); }
-    """,
-    "Salvador Dali": """
-      body { background: linear-gradient(135deg, #1a2a6c, #b21f1f, #fdbb2d); }
-    """,
-    "Rothko": """
-      body { background: linear-gradient(135deg, #141E30, #243B55); }
-    """,
-    "Pollock": """
-      body { background: repeating-linear-gradient(
-        45deg,
-        #222,
-        #222 10px,
-        #333 10px,
-        #333 20px
-      ); }
-    """,
-    "Chagall": """
-      body { background: linear-gradient(135deg, #a18cd1, #fbc2eb); }
-    """,
-    "Basquiat": """
-      body { background: linear-gradient(135deg, #f7971e, #ffd200); }
-    """,
-    "Haring": """
-      body { background: linear-gradient(135deg, #ff512f, #dd2476); }
-    """,
-    "Georgia O'Keeffe": """
-      body { background: linear-gradient(135deg, #ffefba, #ffffff); }
-    """,
-    "Turner": """
-      body { background: linear-gradient(135deg, #f8ffae, #43c6ac); }
-    """,
-    "Seurat": """
-      body { background: radial-gradient(circle, #e0eafc, #cfdef3); }
-    """,
-    "Escher": """
-      body { background: linear-gradient(135deg, #232526, #414345); }
-    """,
+PAINTER_STYLES = {
+    "Van Gogh": {"accent": "#FFB300", "bg": "linear-gradient(135deg,#1e3c72,#2a5298)"},
+    "Monet": {"accent": "#5EC2F2", "bg": "linear-gradient(135deg,#b2fefa,#0ed2f7)"},
+    "Da Vinci": {"accent": "#CDAA7D", "bg": "linear-gradient(135deg,#2c3e50,#bdc3c7)"},
+    "Picasso": {"accent": "#FF4B81", "bg": "linear-gradient(135deg,#000000,#434343)"},
+    "Matisse": {"accent": "#1ABC9C", "bg": "linear-gradient(135deg,#1abc9c,#16a085)"},
+    "Klimt": {"accent": "#F1C40F", "bg": "linear-gradient(135deg,#f1c40f,#e67e22)"},
+    "Hokusai": {"accent": "#2980B9", "bg": "linear-gradient(135deg,#2c3e50,#2980b9)"},
+    "Frida Kahlo": {"accent": "#E74C3C", "bg": "linear-gradient(135deg,#e74c3c,#8e44ad)"},
+    "Rembrandt": {"accent": "#A67C52", "bg": "linear-gradient(135deg,#3c2a21,#8e5a2a)"},
+    "Dali": {"accent": "#F39C12", "bg": "linear-gradient(135deg,#f39c12,#d35400)"},
+    "Cézanne": {"accent": "#3498DB", "bg": "linear-gradient(135deg,#3498db,#2ecc71)"},
+    "Renoir": {"accent": "#E67E22", "bg": "linear-gradient(135deg,#f39c12,#e67e22)"},
+    "Turner": {"accent": "#F5B041", "bg": "linear-gradient(135deg,#f5b041,#f7dc6f)"},
+    "Goya": {"accent": "#7F8C8D", "bg": "linear-gradient(135deg,#2c3e50,#7f8c8d)"},
+    "Basquiat": {"accent": "#F1C40F", "bg": "linear-gradient(135deg,#000000,#f1c40f)"},
+    "Pollock": {"accent": "#E74C3C", "bg": "linear-gradient(135deg,#2c3e50,#e74c3c)"},
+    "O'Keeffe": {"accent": "#9B59B6", "bg": "linear-gradient(135deg,#9b59b6,#e91e63)"},
+    "Chagall": {"accent": "#8E44AD", "bg": "linear-gradient(135deg,#0f2027,#8e44ad)"},
+    "Vermeer": {"accent": "#2980B9", "bg": "linear-gradient(135deg,#f1c40f,#2980b9)"},
+    "Michelangelo": {"accent": "#D35400", "bg": "linear-gradient(135deg,#2c3e50,#d35400)"},
 }
 
 
-# =========================
-# Helper functions
-# =========================
+# ------------- INTERNATIONALIZATION -------------------------------------------
+
+def get_i18n_dict() -> Dict[str, Dict[str, str]]:
+    return {
+        "app_title": {
+            "en": "FDA 510(k) Agentic Review WOW Studio",
+            "zh-tw": "FDA 510(k) 智慧審查 WOW 工作室",
+        },
+        "tab_agents": {"en": "Agent Runner", "zh-tw": "代理人執行器"},
+        "tab_dashboard": {"en": "Dashboard", "zh-tw": "儀表板"},
+        "tab_notes": {"en": "AI Note Keeper", "zh-tw": "AI 筆記管家"},
+        "sidebar_language": {"en": "Language", "zh-tw": "語言"},
+        "sidebar_theme": {"en": "Theme", "zh-tw": "主題"},
+        "sidebar_style": {"en": "Painter Style", "zh-tw": "畫風樣式"},
+        "sidebar_jackpot": {"en": "Jackpot Style", "zh-tw": "隨機大獎樣式"},
+        "sidebar_api_keys": {"en": "API Keys", "zh-tw": "API 金鑰"},
+        "sidebar_llm_settings": {"en": "LLM Settings", "zh-tw": "LLM 設定"},
+        "light": {"en": "Light", "zh-tw": "亮色"},
+        "dark": {"en": "Dark", "zh-tw": "暗色"},
+        "provider_openai": {"en": "OpenAI", "zh-tw": "OpenAI"},
+        "provider_gemini": {"en": "Gemini", "zh-tw": "Gemini"},
+        "provider_anthropic": {"en": "Anthropic", "zh-tw": "Anthropic"},
+        "provider_grok": {"en": "Grok", "zh-tw": "Grok"},
+        "api_from_env": {"en": "Using environment key", "zh-tw": "使用環境變數金鑰"},
+        "api_enter": {"en": "Enter API key", "zh-tw": "請輸入 API 金鑰"},
+        "model": {"en": "Model", "zh-tw": "模型"},
+        "max_tokens": {"en": "Max tokens", "zh-tw": "最大 tokens"},
+        "temperature": {"en": "Temperature", "zh-tw": "溫度"},
+        "agent_select": {"en": "Select agent", "zh-tw": "選擇代理人"},
+        "agent_input": {"en": "Agent input (you can edit previous output here)", "zh-tw": "代理人輸入（可在此編輯上一個輸出）"},
+        "run_agent": {"en": "Run agent", "zh-tw": "執行代理人"},
+        "use_last_output": {"en": "Use last agent output as input", "zh-tw": "使用上一個代理人輸出作為輸入"},
+        "save_for_next": {"en": "Save as input for next agent", "zh-tw": "儲存為下一個代理人輸入"},
+        "output_markdown": {"en": "Markdown view", "zh-tw": "Markdown 檢視"},
+        "output_text": {"en": "Text view (editable)", "zh-tw": "文字檢視（可編輯）"},
+        "status_section": {"en": "WOW Status Indicators", "zh-tw": "WOW 狀態指標"},
+        "status_api": {"en": "API Connectivity", "zh-tw": "API 連線狀態"},
+        "status_docs": {"en": "Documents", "zh-tw": "文件"},
+        "status_runs": {"en": "Agent Runs", "zh-tw": "代理人執行次數"},
+        "notes_paste": {"en": "Paste your text / markdown", "zh-tw": "貼上文字或 Markdown"},
+        "notes_transform": {"en": "Transform to organized markdown", "zh-tw": "轉換為結構化 Markdown"},
+        "notes_model": {"en": "Model for note operations", "zh-tw": "筆記處理模型"},
+        "notes_view_mode": {"en": "Note view mode", "zh-tw": "筆記檢視模式"},
+        "view_markdown": {"en": "Markdown", "zh-tw": "Markdown"},
+        "view_text": {"en": "Text", "zh-tw": "文字"},
+        "ai_magics": {"en": "AI Magics", "zh-tw": "AI 魔法"},
+        "magic_format": {"en": "AI Formatting", "zh-tw": "AI 格式優化"},
+        "magic_keywords": {"en": "AI Keywords Highlighter", "zh-tw": "AI 關鍵字標示"},
+        "magic_summary": {"en": "AI Summary", "zh-tw": "AI 摘要"},
+        "magic_translate": {"en": "AI EN ↔ 繁中 Translate", "zh-tw": "AI 中英互譯"},
+        "magic_expand": {"en": "AI Expansion / Elaboration", "zh-tw": "AI 擴寫說明"},
+        "magic_actions": {"en": "AI Action Items", "zh-tw": "AI 行動清單"},
+        "keywords_input": {"en": "Keywords (comma separated)", "zh-tw": "關鍵字（以逗號分隔）"},
+        "keyword_color": {"en": "Keyword color", "zh-tw": "關鍵字顏色"},
+    }
+
 
 def t(key: str) -> str:
-    """Translate label key based on current language."""
-    lang = st.session_state.settings.get("language", "English")
-    return LABELS.get(key, {}).get(lang, key)
+    lang = st.session_state.get("lang", "en")
+    return get_i18n_dict().get(key, {}).get(lang, key)
 
 
-def apply_style(theme: str, painter_style: str):
-    """Apply painter-based WOW CSS and theme adjustments."""
-    css = STYLE_CSS.get(painter_style, "")
-    if theme == "Dark":
-        css += """
-          body { color: #e0e0e0; }
-          .stButton>button { background-color: #1f2933; color: white; border-radius: 999px; }
-          .stTextInput>div>div>input, .stTextArea textarea {
-            background-color: #111827; color: #e5e7eb; border-radius: 0.5rem;
-          }
-        """
-    else:
-        css += """
-          body { color: #111827; }
-          .stButton>button { background-color: #2563eb; color: white; border-radius: 999px; }
-          .stTextInput>div>div>input, .stTextArea textarea {
-            background-color: #ffffff; color: #111827; border-radius: 0.5rem;
-          }
-        """
-    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+# ------------- SESSION STATE INIT & THEME -------------------------------------
+
+def init_session_state():
+    if "lang" not in st.session_state:
+        st.session_state["lang"] = "en"
+    if "theme" not in st.session_state:
+        st.session_state["theme"] = "light"
+    if "painter_style" not in st.session_state:
+        st.session_state["painter_style"] = "Van Gogh"
+    if "api_keys" not in st.session_state:
+        st.session_state["api_keys"] = {}
+    if "agents_config" not in st.session_state:
+        st.session_state["agents_config"] = load_agents_config()
+    if "run_log" not in st.session_state:
+        st.session_state["run_log"] = []
+    if "last_agent_output" not in st.session_state:
+        st.session_state["last_agent_output"] = ""
+    if "note_content" not in st.session_state:
+        st.session_state["note_content"] = ""
+    if "note_view_mode" not in st.session_state:
+        st.session_state["note_view_mode"] = "markdown"
 
 
-def get_provider(model: str) -> str:
-    if model in OPENAI_MODELS:
+def apply_theme():
+    theme = st.session_state.get("theme", "light")
+    style_name = st.session_state.get("painter_style", "Van Gogh")
+    style_cfg = PAINTER_STYLES.get(style_name, PAINTER_STYLES["Van Gogh"])
+    accent = style_cfg["accent"]
+    bg = style_cfg["bg"]
+
+    base_bg = "#111111" if theme == "dark" else "#FFFFFF"
+    base_text = "#F5F5F5" if theme == "dark" else "#111111"
+
+    css = f"""
+    <style>
+      .stApp {{
+        background: {bg};
+        background-attachment: fixed;
+      }}
+      .main-wrapping-container {{
+        background: {base_bg}CC;
+        padding: 1.5rem;
+        border-radius: 1rem;
+      }}
+      .wow-badge {{
+        display:inline-block;
+        padding:0.15rem 0.45rem;
+        border-radius:999px;
+        font-size:0.7rem;
+        margin-right:0.15rem;
+        background:{accent}22;
+        color:{accent};
+        border:1px solid {accent}66;
+      }}
+      .wow-chip-ok {{
+        background:#2ecc7122;
+        color:#2ecc71;
+        border:1px solid #2ecc7166;
+      }}
+      .wow-chip-warn {{
+        background:#f1c40f22;
+        color:#f1c40f;
+        border:1px solid #f1c40f66;
+      }}
+      .wow-chip-bad {{
+        background:#e74c3c22;
+        color:#e74c3c;
+        border:1px solid #e74c3c66;
+      }}
+      h1, h2, h3, h4, h5, h6, p, span, label {{
+        color:{base_text};
+      }}
+      .coral-keyword {{
+        color: coral;
+        font-weight: 600;
+      }}
+    </style>
+    """
+    st.markdown(css, unsafe_allow_html=True)
+
+
+# ------------- LLM PROVIDER MANAGER ------------------------------------------
+
+class LLMProviderManager:
+    def __init__(self):
+        self.env_keys = {
+            "openai": os.getenv("OPENAI_API_KEY"),
+            "gemini": os.getenv("GEMINI_API_KEY"),
+            "anthropic": os.getenv("ANTHROPIC_API_KEY"),
+            "grok": os.getenv("GROK_API_KEY"),
+        }
+
+    def get_effective_key(self, provider: str) -> Optional[str]:
+        user_key = st.session_state["api_keys"].get(provider)
+        if user_key:
+            return user_key
+        return self.env_keys.get(provider)
+
+    def identify_provider(self, model: str) -> str:
+        if model.startswith("gpt-"):
+            return "openai"
+        if model.startswith("gemini-"):
+            return "gemini"
+        if "claude" in model or "anthropic" in model:
+            return "anthropic"
+        if "grok" in model:
+            return "grok"
         return "openai"
-    if model in GEMINI_MODELS:
-        return "gemini"
-    if model in ANTHROPIC_MODELS:
-        return "anthropic"
-    if model in GROK_MODELS:
-        return "grok"
-    raise ValueError(f"Unknown model: {model}")
 
+    def chat_completion(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        max_tokens: int = 12000,
+        temperature: float = 0.2,
+    ) -> Dict[str, Any]:
+        provider = self.identify_provider(model)
+        api_key = self.get_effective_key(provider)
+        if not api_key:
+            raise RuntimeError(f"No API key found for provider: {provider}")
 
-def call_llm(model: str, system_prompt: str, user_prompt: str,
-             max_tokens: int = 12000, temperature: float = 0.2,
-             api_keys: dict | None = None) -> str:
-    """Synchronous LLM call with routing across OpenAI, Gemini, Anthropic, Grok."""
-    provider = get_provider(model)
-    api_keys = api_keys or {}
+        start = time.time()
+        content = ""
+        tokens_used = None
 
-    def get_key(name: str, env_var: str) -> str:
-        return api_keys.get(name) or os.getenv(env_var) or ""
-
-    if provider == "openai":
-        key = get_key("openai", "OPENAI_API_KEY")
-        if not key:
-            raise RuntimeError("Missing OpenAI API key.")
-        client = OpenAI(api_key=key)
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-        return resp.choices[0].message.content
-
-    if provider == "gemini":
-        key = get_key("gemini", "GEMINI_API_KEY")
-        if not key:
-            raise RuntimeError("Missing Gemini API key.")
-        genai.configure(api_key=key)
-        llm = genai.GenerativeModel(model)
-        resp = llm.generate_content(
-            system_prompt + "\n\n" + user_prompt,
-            generation_config={"max_output_tokens": max_tokens, "temperature": temperature},
-        )
-        return resp.text
-
-    if provider == "anthropic":
-        key = get_key("anthropic", "ANTHROPIC_API_KEY")
-        if not key:
-            raise RuntimeError("Missing Anthropic API key.")
-        client = Anthropic(api_key=key)
-        resp = client.messages.create(
-            model=model,
-            system=system_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        return resp.content[0].text
-
-    if provider == "grok":
-        key = get_key("grok", "GROK_API_KEY")
-        if not key:
-            raise RuntimeError("Missing Grok (xAI) API key.")
-        with httpx.Client(base_url="https://api.x.ai/v1", timeout=60) as client:
-            resp = client.post(
-                "/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                },
+        if provider == "openai":
+            if OpenAI is None:
+                raise RuntimeError("openai package not available")
+            client = OpenAI(api_key=api_key)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
             )
-            resp.raise_for_status()
-            data = resp.json()
-        return data["choices"][0]["message"]["content"]
+            content = resp.choices[0].message.content
+            tokens_used = getattr(resp.usage, "total_tokens", None)
+
+        elif provider == "gemini":
+            if genai is None:
+                raise RuntimeError("google-generativeai package not available")
+            genai.configure(api_key=api_key)
+            model_obj = genai.GenerativeModel(model)
+            # join all messages into single prompt with simple roles
+            joined = []
+            for m in messages:
+                prefix = "System: " if m["role"] == "system" else "User: "
+                joined.append(prefix + m["content"])
+            prompt = "\n".join(joined)
+            resp = model_obj.generate_content(prompt)
+            content = resp.text
+
+        elif provider == "anthropic":
+            if anthropic is None:
+                raise RuntimeError("anthropic package not available")
+            client = anthropic.Anthropic(api_key=api_key)
+            sys_prompt = ""
+            user_content = ""
+            for m in messages:
+                if m["role"] == "system":
+                    sys_prompt += m["content"] + "\n"
+                else:
+                    user_content += m["content"] + "\n"
+            resp = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=sys_prompt.strip(),
+                messages=[{"role": "user", "content": user_content.strip()}],
+            )
+            content = "".join([b.text for b in resp.content if getattr(b, "type", "") == "text"])
+            tokens_used = getattr(resp.usage, "input_tokens", 0) + getattr(resp.usage, "output_tokens", 0)
+
+        elif provider == "grok":
+            # Use OpenAI-compatible HTTP endpoint for xAI Grok
+            headers = {"Authorization": f"Bearer {api_key}"}
+            json = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            with httpx.Client(timeout=120) as client:
+                r = client.post("https://api.x.ai/v1/chat/completions", headers=headers, json=json)
+            r.raise_for_status()
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+            tokens_used = data.get("usage", {}).get("total_tokens")
+
+        duration = time.time() - start
+        return {"content": content, "tokens_used": tokens_used, "duration": duration, "provider": provider}
 
 
-def show_status(step_name: str, status: str):
-    """Small colored indicator."""
-    color = {
-        "pending": "gray",
-        "running": "#f59e0b",
-        "done": "#10b981",
-        "error": "#ef4444",
-    }.get(status, "gray")
-    st.markdown(
-        f"""
-        <div style="display:flex;align-items:center;margin-bottom:0.25rem;">
-          <div style="width:10px;height:10px;border-radius:50%;background:{color};margin-right:6px;"></div>
-          <span style="font-size:0.9rem;">{step_name} – <b>{status}</b></span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+# ------------- AGENT EXECUTOR -------------------------------------------------
+
+def load_agents_config() -> Dict[str, Any]:
+    path = Path("agents.yaml")
+    if not path.exists():
+        return {"agents": {}, "defaults": {"max_tokens": 12000, "temperature": 0.2}}
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
-def log_event(tab: str, agent: str, model: str, tokens_est: int):
-    st.session_state["history"].append({
-        "tab": tab,
-        "agent": agent,
-        "model": model,
-        "tokens_est": tokens_est,
-        "ts": datetime.utcnow().isoformat()
-    })
+class AgentExecutor:
+    def __init__(self, llm_manager: LLMProviderManager, agents_config: Dict[str, Any]):
+        self.llm_manager = llm_manager
+        self.config = agents_config or {"agents": {}, "defaults": {}}
+        self.defaults = self.config.get("defaults", {})
+
+    def list_agents(self) -> List[Dict[str, Any]]:
+        agents = []
+        for agent_id, cfg in self.config.get("agents", {}).items():
+            agents.append({"id": agent_id, **cfg})
+        # sort by skill_number if present
+        agents.sort(key=lambda a: a.get("skill_number", 999))
+        return agents
+
+    def execute(
+        self,
+        agent_id: str,
+        user_input: str,
+        model_override: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        agents = self.config.get("agents", {})
+        if agent_id not in agents:
+            raise RuntimeError(f"Unknown agent: {agent_id}")
+        cfg = agents[agent_id]
+        system_prompt = cfg.get("system_prompt", "")
+        model = model_override or cfg.get("default_model") or st.session_state.get("global_model", MODEL_OPTIONS[0])
+        max_tokens = max_tokens or self.defaults.get("max_tokens", 12000)
+        temperature = temperature if temperature is not None else self.defaults.get("temperature", 0.2)
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_input.strip() or "Use your configured behavior with the current context."},
+        ]
+
+        resp = self.llm_manager.chat_completion(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return {
+            "status": "success",
+            "output": resp["content"],
+            "model": model,
+            "tokens_used": resp.get("tokens_used"),
+            "duration_seconds": resp.get("duration"),
+        }
 
 
-def extract_pdf_pages_to_text(file, start_page: int, end_page: int) -> str:
-    """Extract text from a PDF between start_page and end_page (1-based, inclusive)."""
-    reader = PdfReader(file)
-    n = len(reader.pages)
-    start = max(0, start_page - 1)
-    end = min(n, end_page)
-    texts = []
-    for i in range(start, end):
-        try:
-            texts.append(reader.pages[i].extract_text() or "")
-        except Exception:
-            texts.append("")
-    return "\n\n".join(texts)
+# ------------- SIDEBAR (THEME, LANGUAGE, API, MODEL) -------------------------
+
+def render_sidebar(llm_manager: LLMProviderManager):
+    with st.sidebar:
+        st.markdown("### 🎨 WOW Studio")
+        lang = st.radio(t("sidebar_language"), ["en", "zh-tw"], index=0 if st.session_state["lang"] == "en" else 1,
+                        horizontal=True)
+        st.session_state["lang"] = lang
+
+        theme = st.radio(
+            t("sidebar_theme"),
+            [t("light"), t("dark")],
+            index=0 if st.session_state["theme"] == "light" else 1,
+            horizontal=True,
+        )
+        st.session_state["theme"] = "light" if theme == t("light") else "dark"
+
+        style = st.selectbox(t("sidebar_style"), list(PAINTER_STYLES.keys()), index=list(PAINTER_STYLES.keys()).index(
+            st.session_state["painter_style"]))
+        st.session_state["painter_style"] = style
+        if st.button("🎰 " + t("sidebar_jackpot")):
+            st.session_state["painter_style"] = random.choice(list(PAINTER_STYLES.keys()))
+            st.experimental_rerun()
+
+        st.markdown("---")
+        st.markdown(f"### 🔐 {t('sidebar_api_keys')}")
+
+        def key_row(provider_key: str, label_key: str, env_var: str):
+            env_val = llm_manager.env_keys.get(provider_key)
+            st.caption(f"{t(label_key)} ({env_var})")
+            col1, col2 = st.columns([3, 2])
+            with col1:
+                if env_val:
+                    st.success("✅ " + t("api_from_env"))
+                else:
+                    api_val = st.text_input(
+                        t("api_enter"),
+                        type="password",
+                        key=f"api_{provider_key}",
+                    )
+                    if api_val:
+                        st.session_state["api_keys"][provider_key] = api_val
+            with col2:
+                effective = llm_manager.get_effective_key(provider_key)
+                status_class = "wow-chip-ok" if effective else "wow-chip-bad"
+                status_label = "ON" if effective else "OFF"
+                st.markdown(f'<span class="wow-badge {status_class}">{status_label}</span>',
+                            unsafe_allow_html=True)
+
+        key_row("openai", "provider_openai", "OPENAI_API_KEY")
+        key_row("gemini", "provider_gemini", "GEMINI_API_KEY")
+        key_row("anthropic", "provider_anthropic", "ANTHROPIC_API_KEY")
+        key_row("grok", "provider_grok", "GROK_API_KEY")
+
+        st.markdown("---")
+        st.markdown(f"### 🤖 {t('sidebar_llm_settings')}")
+        model = st.selectbox(t("model"), MODEL_OPTIONS, index=0)
+        st.session_state["global_model"] = model
+        max_tokens = st.number_input(t("max_tokens"), min_value=256, max_value=120000, value=12000, step=256)
+        st.session_state["global_max_tokens"] = int(max_tokens)
+        temperature = st.slider(t("temperature"), min_value=0.0, max_value=1.0, value=0.2, step=0.05)
+        st.session_state["global_temperature"] = float(temperature)
 
 
-def agent_run_ui(
-    agent_id: str,
-    tab_key: str,
-    default_prompt: str,
-    default_input_text: str = "",
-    allow_model_override: bool = True,
-    tab_label_for_history: str | None = None,
-):
-    """Reusable UI for running any agent defined in agents.yaml."""
-    agents_cfg = st.session_state["agents_cfg"]
-    agent_cfg = agents_cfg["agents"][agent_id]
-    status_key = f"{tab_key}_status"
-    if status_key not in st.session_state:
-        st.session_state[status_key] = "pending"
+# ------------- WOW STATUS INDICATORS & DASHBOARD -----------------------------
 
-    show_status(agent_cfg.get("name", agent_id), st.session_state[status_key])
+def render_status_header(llm_manager: LLMProviderManager):
+    st.markdown("#### ⚡ " + t("status_section"))
+    col1, col2, col3 = st.columns(3)
 
-    col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        user_prompt = st.text_area(
-            "Prompt",
-            value=st.session_state.get(f"{tab_key}_prompt", default_prompt),
-            height=160,
-            key=f"{tab_key}_prompt",
+        any_api = any(llm_manager.get_effective_key(p) for p in ["openai", "gemini", "anthropic", "grok"])
+        cls = "wow-chip-ok" if any_api else "wow-chip-bad"
+        label = "OK" if any_api else "Missing"
+        st.markdown(
+            f'{t("status_api")}<br><span class="wow-badge {cls}">{label}</span>',
+            unsafe_allow_html=True,
         )
     with col2:
-        base_model = agent_cfg.get("default_model", st.session_state.settings["model"])
-        model_index = ALL_MODELS.index(base_model) if base_model in ALL_MODELS else 0
-        model = st.selectbox(
-            "Model",
-            ALL_MODELS,
-            index=model_index,
-            disabled=not allow_model_override,
-            key=f"{tab_key}_model",
+        docs_loaded = bool(st.session_state.get("uploaded_docs_raw"))
+        cls = "wow-chip-ok" if docs_loaded else "wow-chip-warn"
+        label = "Loaded" if docs_loaded else "None"
+        st.markdown(
+            f'{t("status_docs")}<br><span class="wow-badge {cls}">{label}</span>',
+            unsafe_allow_html=True,
         )
     with col3:
-        max_tokens = st.number_input(
-            "max_tokens",
-            min_value=1000,
-            max_value=120000,
-            value=st.session_state.settings["max_tokens"],
-            step=1000,
-            key=f"{tab_key}_max_tokens",
+        runs = len(st.session_state["run_log"])
+        cls = "wow-chip-ok" if runs > 0 else "wow-chip-warn"
+        st.markdown(
+            f'{t("status_runs")}<br><span class="wow-badge {cls}">{runs} run(s)</span>',
+            unsafe_allow_html=True,
         )
 
-    input_text = st.text_area(
-        "Input Text / Markdown",
-        value=st.session_state.get(f"{tab_key}_input", default_input_text),
-        height=260,
-        key=f"{tab_key}_input",
-    )
 
-    run = st.button("Run Agent", key=f"{tab_key}_run")
+def render_dashboard_tab():
+    import pandas as pd
+    import altair as alt
 
-    if run:
-        st.session_state[status_key] = "running"
-        show_status(agent_cfg.get("name", agent_id), "running")
-        api_keys = st.session_state.get("api_keys", {})
-        system_prompt = agent_cfg.get("system_prompt", "")
-        user_full = f"{user_prompt}\n\n---\n\n{input_text}"
+    st.markdown("### 📊 Interactive Review Dashboard")
 
-        with st.spinner("Running agent..."):
-            try:
-                out = call_llm(
-                    model=model,
-                    system_prompt=system_prompt,
-                    user_prompt=user_full,
-                    max_tokens=max_tokens,
-                    temperature=st.session_state.settings["temperature"],
-                    api_keys=api_keys,
-                )
-                st.session_state[f"{tab_key}_output"] = out
-                st.session_state[status_key] = "done"
-                # Rough token estimate by characters
-                token_est = int(len(user_full + out) / 4)
-                log_event(
-                    tab_label_for_history or tab_key,
-                    agent_cfg.get("name", agent_id),
-                    model,
-                    token_est,
-                )
-            except Exception as e:
-                st.session_state[status_key] = "error"
-                st.error(f"Agent error: {e}")
-
-    # Editable output
-    output = st.session_state.get(f"{tab_key}_output", "")
-    view_mode = st.radio(
-        "View mode", ["Markdown", "Plain text"],
-        horizontal=True, key=f"{tab_key}_viewmode"
-    )
-    if view_mode == "Markdown":
-        edited = st.text_area(
-            "Output (Markdown, editable)",
-            value=output,
-            height=320,
-            key=f"{tab_key}_output_md",
-        )
-    else:
-        edited = st.text_area(
-            "Output (Plain text, editable)",
-            value=output,
-            height=320,
-            key=f"{tab_key}_output_txt",
-        )
-
-    st.session_state[f"{tab_key}_output_edited"] = edited
-
-
-# =========================
-# Sidebar (WOW UI + API)
-# =========================
-
-def render_sidebar():
-    with st.sidebar:
-        st.markdown("### Global Settings")
-
-        # Theme
-        st.session_state.settings["theme"] = st.radio(
-            "Theme", ["Light", "Dark"],
-            index=0 if st.session_state.settings["theme"] == "Light" else 1,
-        )
-
-        # Language
-        st.session_state.settings["language"] = st.radio(
-            "Language", ["English", "繁體中文"],
-            index=0 if st.session_state.settings["language"] == "English" else 1,
-        )
-
-        # Painter style + Jackpot
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            style = st.selectbox(
-                "Painter Style",
-                PAINTER_STYLES,
-                index=PAINTER_STYLES.index(st.session_state.settings["painter_style"]),
-            )
-        with col2:
-            if st.button("Jackpot!"):
-                import random
-                style = random.choice(PAINTER_STYLES)
-        st.session_state.settings["painter_style"] = style
-
-        # Default model, tokens, temperature
-        st.session_state.settings["model"] = st.selectbox(
-            "Default Model",
-            ALL_MODELS,
-            index=ALL_MODELS.index(st.session_state.settings["model"]),
-        )
-        st.session_state.settings["max_tokens"] = st.number_input(
-            "Default max_tokens",
-            min_value=1000,
-            max_value=120000,
-            value=st.session_state.settings["max_tokens"],
-            step=1000,
-        )
-        st.session_state.settings["temperature"] = st.slider(
-            "Temperature",
-            0.0,
-            1.0,
-            st.session_state.settings["temperature"],
-            0.05,
-        )
-
-        # API Keys (hidden if from env)
-        st.markdown("---")
-        st.markdown("### API Keys")
-
-        keys = {}
-
-        if os.getenv("OPENAI_API_KEY"):
-            keys["openai"] = os.getenv("OPENAI_API_KEY")
-            st.caption("OpenAI key from environment.")
-        else:
-            keys["openai"] = st.text_input("OpenAI API Key", type="password")
-
-        if os.getenv("GEMINI_API_KEY"):
-            keys["gemini"] = os.getenv("GEMINI_API_KEY")
-            st.caption("Gemini key from environment.")
-        else:
-            keys["gemini"] = st.text_input("Gemini API Key", type="password")
-
-        if os.getenv("ANTHROPIC_API_KEY"):
-            keys["anthropic"] = os.getenv("ANTHROPIC_API_KEY")
-            st.caption("Anthropic key from environment.")
-        else:
-            keys["anthropic"] = st.text_input("Anthropic API Key", type="password")
-
-        if os.getenv("GROK_API_KEY"):
-            keys["grok"] = os.getenv("GROK_API_KEY")
-            st.caption("Grok key from environment.")
-        else:
-            keys["grok"] = st.text_input("Grok API Key", type="password")
-
-        st.session_state["api_keys"] = keys
-
-
-# =========================
-# Tab renderers
-# =========================
-
-def render_dashboard():
-    st.title(t("Dashboard"))
-    hist = st.session_state["history"]
-    if not hist:
-        st.info("No runs yet.")
+    logs = st.session_state.get("run_log", [])
+    if not logs:
+        st.info("No agent runs yet. Execute an agent run first.")
         return
 
-    df = pd.DataFrame(hist)
+    df = pd.DataFrame(logs)
+    with st.expander("Raw run log"):
+        st.dataframe(df, use_container_width=True)
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Runs", len(df))
+        st.metric("Total runs", len(df))
     with col2:
-        st.metric("Unique 510(k) Sessions", df[df["tab"].str.contains("510", na=False)].shape[0])
+        st.metric("Unique agents", df["agent_id"].nunique())
     with col3:
-        st.metric("Approx Tokens Processed", int(df["tokens_est"].sum()))
+        st.metric("Total tokens (if reported)", int(df["tokens_used"].fillna(0).sum()))
 
-    st.subheader("Runs by Tab")
-    chart = alt.Chart(df).mark_bar().encode(
-        x="tab:N",
-        y="count():Q",
-        color="tab:N",
-        tooltip=["tab", "count()"],
-    )
-    st.altair_chart(chart, use_container_width=True)
-
-    st.subheader("Recent Activity")
-    st.dataframe(df.sort_values("ts", ascending=False).head(25), use_container_width=True)
-
-
-def render_510k_tab():
-    st.title(t("510k_tab"))
-
-    col1, col2 = st.columns(2)
-    with col1:
-        device_name = st.text_input("Device Name")
-        k_number = st.text_input("510(k) Number (e.g., K123456)")
-    with col2:
-        sponsor = st.text_input("Sponsor / Manufacturer (optional)")
-        product_code = st.text_input("Product Code (optional)")
-
-    extra_info = st.text_area("Additional context (indications, technology, etc.)")
-
-    default_prompt = f"""
-You are assisting an FDA 510(k) reviewer.
-
-Task:
-1. Search FDA resources (or emulate such search) for:
-   - Device: {device_name}
-   - 510(k) number: {k_number}
-   - Sponsor: {sponsor}
-   - Product code: {product_code}
-2. Synthesize a 3000–4000 word detailed, review-oriented summary.
-3. Provide AT LEAST 5 well-structured markdown tables covering at minimum:
-   - Device overview (trade name, sponsor, 510(k) number, product code, regulation number)
-   - Indications for use and intended population
-   - Technological characteristics and comparison with predicate(s)
-   - Performance testing (bench, animal, clinical) and acceptance criteria
-   - Risks and corresponding risk controls/mitigations
-
-Language: {st.session_state.settings["language"]}.
-
-Use headings that match FDA 510(k) review style.
-"""
-    combined_input = f"""
-=== Device Inputs ===
-Device name: {device_name}
-510(k) number: {k_number}
-Sponsor: {sponsor}
-Product code: {product_code}
-
-Additional context:
-{extra_info}
-"""
-
-    agent_run_ui(
-        agent_id="fda_search_agent",
-        tab_key="510k",
-        default_prompt=default_prompt,
-        default_input_text=combined_input,
-        tab_label_for_history="510(k) Intelligence",
-    )
-
-
-def render_pdf_to_md_tab():
-    st.title("PDF → Markdown Transformer")
-
-    uploaded = st.file_uploader("Upload 510(k) or related PDF", type=["pdf"])
-    if uploaded:
-        col1, col2 = st.columns(2)
-        with col1:
-            num_start = st.number_input("From page", min_value=1, value=1)
-        with col2:
-            num_end = st.number_input("To page", min_value=1, value=10)
-
-        if st.button("Extract Pages"):
-            text = extract_pdf_pages_to_text(uploaded, int(num_start), int(num_end))
-            st.session_state["pdf_raw_text"] = text
-
-    raw_text = st.session_state.get("pdf_raw_text", "")
-    if raw_text:
-        default_prompt = f"""
-You are converting part of a regulatory PDF into markdown.
-
-- Input pages: a 510(k) submission, guidance, or related document excerpt.
-- Goal: produce clean, structured markdown preserving headings, lists,
-  and tables (as markdown tables) as much as reasonably possible.
-- Do not hallucinate content that is not in the text.
-- Clearly separate sections corresponding to major headings.
-
-Language: {st.session_state.settings["language"]}.
-"""
-        agent_run_ui(
-            agent_id="pdf_to_markdown_agent",
-            tab_key="pdf_to_md",
-            default_prompt=default_prompt,
-            default_input_text=raw_text,
-            tab_label_for_history="PDF → Markdown",
+    # Tokens by agent
+    if "tokens_used" in df.columns:
+        chart_data = (
+            df.groupby("agent_id")["tokens_used"]
+            .sum()
+            .reset_index()
+            .sort_values("tokens_used", ascending=False)
         )
-    else:
-        st.info("Upload a PDF and click 'Extract Pages' to begin.")
-
-
-def render_summary_tab():
-    st.title("Comprehensive Summary & Entities")
-
-    base_md = st.session_state.get("pdf_to_md_output_edited", "")
-    if base_md:
-        default_input = base_md
-    else:
-        default_input = st.text_area("Paste markdown to summarize", value="", height=300)
-
-    default_prompt = f"""
-You are assisting an FDA 510(k) reviewer.
-
-Given the following markdown document (derived from a 510(k) or related
-submission), perform two tasks:
-
-1. Produce a 3000–4000 word high-quality summary structured for a 510(k)
-   review memo. Include sections such as:
-   - Device description
-   - Indications for use
-   - Predicate device comparison
-   - Technological characteristics
-   - Performance testing
-   - Biocompatibility
-   - Sterilization and shelf life
-   - Software / cybersecurity (if applicable)
-   - Risk management
-   - Benefit-risk discussion
-   - Overall assessment / outstanding issues
-
-2. Extract at least 20 key entities and present them in a markdown table with
-   columns:
-   - Entity Type (e.g., Indication, Risk, Test, Mitigation, Design Feature)
-   - Entity Name / Phrase
-   - Context (short excerpt or explanation)
-   - Reviewer Comment / Considerations
-   - Location / Section (if evident)
-
-Language: {st.session_state.settings["language"]}.
-"""
-
-    agent_run_ui(
-        agent_id="summary_entities_agent",
-        tab_key="summary",
-        default_prompt=default_prompt,
-        default_input_text=default_input,
-        tab_label_for_history="Summary & Entities",
-    )
-
-
-def render_diff_tab():
-    st.title("Dual-Version Comparator")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        pdf_old = st.file_uploader("Upload Old Version PDF", type=["pdf"], key="pdf_old")
-    with col2:
-        pdf_new = st.file_uploader("Upload New Version PDF", type=["pdf"], key="pdf_new")
-
-    if pdf_old and pdf_new and st.button("Extract Text for Comparison"):
-        st.session_state["old_text"] = extract_pdf_pages_to_text(pdf_old, 1, 9999)
-        st.session_state["new_text"] = extract_pdf_pages_to_text(pdf_new, 1, 9999)
-
-    old_txt = st.session_state.get("old_text", "")
-    new_txt = st.session_state.get("new_text", "")
-
-    if old_txt and new_txt:
-        combined = f"=== OLD VERSION ===\n{old_txt}\n\n=== NEW VERSION ===\n{new_txt}"
-
-        default_prompt = f"""
-You are comparing two versions of a 510(k)-related document.
-
-Tasks:
-1. Identify at least 100 meaningful differences between the OLD and NEW versions.
-2. Differences may include:
-   - Added/removed/changed text
-   - Updated indications, risks, or test results
-   - New mitigation measures
-   - Changes likely to affect safety or effectiveness
-
-3. Present them in a markdown table with columns:
-   - Title (short label for the difference)
-   - Difference (what changed, including before/after summary)
-   - Reference Pages / Sections (approximate, if possible)
-   - Comments (regulatory significance, potential review impact)
-
-Language: {st.session_state.settings["language"]}.
-"""
-
-        agent_run_ui(
-            agent_id="diff_agent",
-            tab_key="diff",
-            default_prompt=default_prompt,
-            default_input_text=combined,
-            tab_label_for_history="Comparator",
-        )
-
-        st.markdown("---")
-        st.subheader("Run additional agents from agents.yaml on this combined doc")
-
-        agents_cfg = st.session_state["agents_cfg"]
-        agent_ids = list(agents_cfg["agents"].keys())
-        selected_agents = st.multiselect(
-            "Select agents to run on the current combined document",
-            agent_ids,
-        )
-
-        current_text = st.session_state.get("diff_output_edited", combined)
-        for aid in selected_agents:
-            st.markdown(f"#### Agent: {agents_cfg['agents'][aid]['name']}")
-            agent_run_ui(
-                agent_id=aid,
-                tab_key=f"diff_{aid}",
-                default_prompt=agents_cfg["agents"][aid].get("system_prompt", ""),
-                default_input_text=current_text,
-                tab_label_for_history=f"Comparator-{aid}",
+        st.markdown("#### Tokens by agent")
+        chart = (
+            alt.Chart(chart_data)
+            .mark_bar()
+            .encode(
+                x=alt.X("agent_id", sort="-y", title="Agent"),
+                y=alt.Y("tokens_used", title="Tokens"),
+                tooltip=["agent_id", "tokens_used"],
             )
-            current_text = st.session_state.get(f"diff_{aid}_output_edited", current_text)
+            .properties(height=300)
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+    # Runs over time
+    if "timestamp" in df.columns:
+        st.markdown("#### Runs over time")
+        chart2 = (
+            alt.Chart(df)
+            .mark_line(point=True)
+            .encode(
+                x="timestamp:T",
+                y="count()",
+                tooltip=["timestamp", "agent_id", "model"],
+                color="agent_id",
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(chart2, use_container_width=True)
+
+
+# ------------- AGENT RUNNER TAB ----------------------------------------------
+
+def render_agent_runner_tab(executor: AgentExecutor):
+    st.markdown("### 🧠 " + t("tab_agents"))
+
+    # Document upload / paste
+    if "uploaded_docs_raw" not in st.session_state:
+        st.session_state["uploaded_docs_raw"] = []
+
+    with st.expander("📁 Upload or paste submission materials", expanded=False):
+        files = st.file_uploader(
+            "Upload PDFs / text files",
+            type=["pdf", "txt", "md"],
+            accept_multiple_files=True,
+        )
+        if files:
+            for f in files:
+                try:
+                    content = f.read()
+                    try:
+                        text = content.decode("utf-8", errors="ignore")
+                    except AttributeError:
+                        text = content
+                    st.session_state["uploaded_docs_raw"].append(
+                        {"name": f.name, "size": f.size, "content": text}
+                    )
+                    st.success(f"Loaded {f.name}")
+                except Exception as e:
+                    st.error(f"Error reading {f.name}: {e}")
+
+        paste = st.text_area("Paste text", height=150)
+        if st.button("Save pasted as document"):
+            if paste.strip():
+                st.session_state["uploaded_docs_raw"].append(
+                    {"name": f"Pasted-{len(st.session_state['uploaded_docs_raw'])+1}", "size": len(paste),
+                     "content": paste}
+                )
+                st.success("Pasted content saved.")
+            else:
+                st.warning("Nothing to save.")
+
+        docs = st.session_state["uploaded_docs_raw"]
+        if docs:
+            st.markdown("**Loaded documents:**")
+            for d in docs[-5:]:
+                st.markdown(f"- {d['name']} ({len(d['content'])} chars)")
+
+    # Agent selection
+    agents = executor.list_agents()
+    if not agents:
+        st.error("No agents found in agents.yaml")
+        return
+
+    agent_labels = [
+        f"[#{a.get('skill_number','?')}] {a.get('name','')} ({a['id']})" for a in agents
+    ]
+    idx = st.selectbox(
+        t("agent_select"),
+        list(range(len(agents))),
+        format_func=lambda i: agent_labels[i],
+    )
+    agent_cfg = agents[idx]
+
+    with st.expander("Agent details", expanded=False):
+        st.markdown(f"**ID:** `{agent_cfg['id']}`")
+        st.markdown(f"**Skill #:** {agent_cfg.get('skill_number','?')}")
+        st.markdown(f"**Category:** {agent_cfg.get('category','')}")
+        st.markdown(f"**Description:** {agent_cfg.get('description','')}")
+        st.markdown("**System prompt (truncated):**")
+        sys_prompt = agent_cfg.get("system_prompt", "")
+        st.code(textwrap.shorten(sys_prompt, width=1200, placeholder="..."))
+
+    # Input source
+    col_a, col_b = st.columns([2, 1])
+    with col_b:
+        use_last = st.checkbox(t("use_last_output"), value=False)
+    default_input = ""
+    if use_last and st.session_state["last_agent_output"]:
+        default_input = st.session_state["last_agent_output"]
     else:
-        st.info("Upload both old and new PDFs, then click 'Extract Text for Comparison'.")
+        # Default: concat docs (trimmed)
+        docs = st.session_state.get("uploaded_docs_raw", [])
+        merged = "\n\n".join(d["content"] for d in docs)
+        default_input = textwrap.shorten(merged, width=8000, placeholder="\n\n[TRUNCATED DOCUMENT CONTENT]\n")
 
-
-def render_checklist_tab():
-    st.title("Review Checklist & Report")
-
-    # Step 1: Checklist
-    st.subheader("Step 1: Provide Review Guidance")
-    guidance_file = st.file_uploader("Upload guidance (PDF/MD/TXT)", type=["pdf", "md", "txt"])
-    guidance_text = ""
-    if guidance_file:
-        if guidance_file.type == "application/pdf":
-            guidance_text = extract_pdf_pages_to_text(guidance_file, 1, 9999)
-        else:
-            guidance_text = guidance_file.read().decode("utf-8", errors="ignore")
-
-    manual_guidance = st.text_area("Or paste guidance text/markdown", height=200)
-    guidance_text = guidance_text or manual_guidance
-
-    if guidance_text:
-        default_prompt = f"""
-You are creating a 510(k) review checklist based on the following guidance.
-
-Tasks:
-1. Identify all relevant review topics, including:
-   - Indications and intended use
-   - Device description / technological characteristics
-   - Predicate comparison
-   - Performance testing (bench, animal, clinical)
-   - Biocompatibility, sterilization, software, labeling, etc.
-2. Create a markdown checklist with sections and individual items.
-3. For each item include:
-   - Item ID
-   - Question / Criterion
-   - Rationale / Source (section of guidance)
-   - Response options (e.g., Yes/No/NA)
-   - Reviewer notes (blank line placeholder)
-
-Language: {st.session_state.settings["language"]}.
-"""
-
-        agent_run_ui(
-            agent_id="checklist_agent",
-            tab_key="checklist",
-            default_prompt=default_prompt,
-            default_input_text=guidance_text,
-            tab_label_for_history="Checklist",
+    with col_a:
+        user_input = st.text_area(
+            t("agent_input"),
+            value=default_input,
+            height=220,
         )
 
-    st.markdown("---")
-    st.subheader("Step 2: Build Review Report")
+    # Override model / params
+    with st.expander("Override model & parameters (optional)", expanded=False):
+        model_override = st.selectbox(
+            "Model override",
+            ["(use agent default)"] + MODEL_OPTIONS,
+            index=0,
+            key="agent_model_override",
+        )
+        if model_override == "(use agent default)":
+            model_override = None
 
-    checklist_md = st.session_state.get("checklist_output_edited", "")
-    review_results_file = st.file_uploader("Upload review results (TXT/MD)", type=["txt", "md"])
-    review_results_text = ""
-    if review_results_file:
-        review_results_text = review_results_file.read().decode("utf-8", errors="ignore")
-    review_results_manual = st.text_area("Or paste review results", height=200)
-    review_results = review_results_text or review_results_manual
+        max_tokens_override = st.number_input(
+            "Max tokens (blank = global default)",
+            min_value=256,
+            max_value=120000,
+            value=st.session_state.get("global_max_tokens", 12000),
+            step=256,
+        )
+        temp_override = st.slider(
+            "Temperature (blank = global default)",
+            min_value=0.0,
+            max_value=1.0,
+            value=st.session_state.get("global_temperature", 0.2),
+            step=0.05,
+        )
 
-    if checklist_md and review_results:
-        default_prompt = f"""
-You are creating a formal 510(k) review report.
+    if st.button("🚀 " + t("run_agent"), type="primary"):
+        try:
+            with st.spinner("Running agent..."):
+                res = executor.execute(
+                    agent_id=agent_cfg["id"],
+                    user_input=user_input,
+                    model_override=model_override,
+                    max_tokens=int(max_tokens_override),
+                    temperature=float(temp_override),
+                )
+            st.session_state["last_agent_output"] = res["output"]
 
-Inputs:
-- Checklist (markdown): a structured checklist created earlier.
-- Review results: responses, notes, and conclusions from the reviewer.
+            # Log
+            st.session_state["run_log"].append(
+                {
+                    "timestamp": pd_timestamp_now(),  # defined below
+                    "agent_id": agent_cfg["id"],
+                    "model": res["model"],
+                    "tokens_used": res.get("tokens_used"),
+                    "duration": res.get("duration_seconds"),
+                    "status": res.get("status"),
+                }
+            )
 
-Tasks:
-1. Integrate the checklist and review results into a coherent review report.
-2. Use a structure similar to FDA review memos, e.g.:
-   - Administrative information
-   - Device and indications
-   - Description and predicates
-   - Non-clinical performance
-   - Clinical performance (if applicable)
-   - Risk assessment
-   - Benefit-risk assessment
-   - Conclusions and recommendations
+            st.success("Agent executed.")
+            render_agent_output(res, agent_cfg)
+        except Exception as e:
+            st.error(f"Error during agent execution: {e}")
 
-3. Make sure each checklist item is accounted for in the narrative, especially
-   unresolved issues, deficiencies, or conditions of clearance.
+    # Always show latest output if exists
+    if st.session_state.get("last_agent_output"):
+        with st.expander("Latest output", expanded=True):
+            render_agent_output(
+                {
+                    "output": st.session_state["last_agent_output"],
+                    "model": "(last)",
+                    "tokens_used": None,
+                    "duration_seconds": None,
+                    "status": "success",
+                },
+                agent_cfg,
+                show_metrics=False,
+            )
 
-Language: {st.session_state.settings["language"]}.
-"""
 
-        combined_input = f"=== CHECKLIST ===\n{checklist_md}\n\n=== REVIEW RESULTS ===\n{review_results}"
+def render_agent_output(result: Dict[str, Any], agent_cfg: Dict[str, Any], show_metrics: bool = True):
+    if show_metrics:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Model", result.get("model", ""))
+        with col2:
+            st.metric("Tokens", result.get("tokens_used", 0) or 0)
+        with col3:
+            st.metric("Duration (s)", round(result.get("duration_seconds", 0) or 0, 2))
 
-        agent_run_ui(
-            agent_id="report_agent",
-            tab_key="review_report",
-            default_prompt=default_prompt,
-            default_input_text=combined_input,
-            tab_label_for_history="Review Report",
+    tab1, tab2 = st.tabs([t("output_markdown"), t("output_text")])
+    with tab1:
+        st.markdown(result.get("output", ""), unsafe_allow_html=True)
+    with tab2:
+        edited = st.text_area(
+            t("output_text"),
+            value=result.get("output", ""),
+            height=260,
+        )
+        if st.button("💾 " + t("save_for_next")):
+            st.session_state["last_agent_output"] = edited
+            st.success("Saved for next agent input.")
+
+
+# ------------- AI NOTE KEEPER TAB --------------------------------------------
+
+def format_note_with_coral_keywords(text: str) -> str:
+    # Basic structure; LLM will improve later if user wants.
+    lines = [l.strip() for l in text.splitlines()]
+    bullets = [f"- {l}" for l in lines if l]
+    md = "\n".join(bullets)
+    return md
+
+
+def highlight_keywords(note: str, keywords: List[str], color: str) -> str:
+    # naive keyword replacement
+    out = note
+    for kw in sorted(set(k.strip() for k in keywords if k.strip()), key=len, reverse=True):
+        out = out.replace(
+            kw,
+            f'<span style="color:{color}; font-weight:600;">{kw}</span>',
+        )
+    return out
+
+
+def run_note_llm(
+    llm_manager: LLMProviderManager,
+    note: str,
+    magic: str,
+    model: str,
+    extra: Dict[str, Any] = None,
+) -> str:
+    extra = extra or {}
+    system_prompt = ""
+    if magic == "format":
+        system_prompt = (
+            "You are an expert technical editor. Clean and reformat this note into well-structured markdown with "
+            "clear headings, bullet lists, and a short summary. Do not invent new facts."
+        )
+    elif magic == "keywords":
+        kws = extra.get("keywords", [])
+        color = extra.get("color", "coral")
+        system_prompt = (
+            "You are a highlighting engine. Given the note and a list of keywords, return markdown where each exact "
+            f"keyword is wrapped in <span style='color:{color}; font-weight:600;'>keyword</span>. Do not change other text."
+            f"\n\nKeywords: {', '.join(kws)}"
+        )
+    elif magic == "summary":
+        system_prompt = "Summarize the note into concise bullet points and a short abstract, in markdown."
+    elif magic == "translate":
+        system_prompt = (
+            "Detect if the note is in English or Traditional Chinese and translate it to the OTHER language. "
+            "Keep markdown formatting."
+        )
+    elif magic == "expand":
+        system_prompt = (
+            "Expand and elaborate the note, adding clarifying explanations and examples, but keep original structure. "
+            "Output markdown."
+        )
+    elif magic == "actions":
+        system_prompt = (
+            "Extract and list all clear action items from the note. For each action, provide: "
+            "1) action statement, 2) owner if mentioned, 3) due date if mentioned, 4) priority if inferable."
+            "Output as a markdown task list."
         )
     else:
-        st.info("Provide both a checklist and review results to generate a report.")
+        return note
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": note},
+    ]
+    resp = llm_manager.chat_completion(
+        model=model,
+        messages=messages,
+        max_tokens=4096,
+        temperature=0.1,
+    )
+    return resp["content"]
 
 
-def render_note_keeper_tab():
-    st.title("AI Note Keeper & Magics")
-
-    raw_notes = st.text_area("Paste your notes (text or markdown)", height=300, key="notes_raw")
-    if raw_notes:
-        default_prompt = f"""
-You are restructuring a 510(k) reviewer's notes into organized markdown.
-
-Tasks:
-1. Identify major sections and sub-sections.
-2. Convert bullet fragments into readable sentences where helpful.
-3. Highlight key points, open questions, and follow-up items.
-4. Avoid inventing information not present in the notes.
-
-Language: {st.session_state.settings["language"]}.
-"""
-        agent_run_ui(
-            agent_id="note_keeper_agent",
-            tab_key="notes",
-            default_prompt=default_prompt,
-            default_input_text=raw_notes,
-            tab_label_for_history="Note Keeper",
-        )
-
-    processed = st.session_state.get("notes_output_edited", raw_notes)
-
-    st.markdown("---")
-    st.subheader("AI Magics")
-
-    st.markdown("Select a Magic and apply it to the current note.")
-    magic_options = {
-        "AI Formatting": "magic_formatting_agent",
-        "AI Keywords": "magic_keywords_agent",
-        "AI Action Items": "magic_action_items_agent",
-        "AI Concept Map": "magic_concept_map_agent",
-        "AI Glossary": "magic_glossary_agent",
-    }
+def render_note_keeper_tab(llm_manager: LLMProviderManager):
+    st.markdown("### 📝 " + t("tab_notes"))
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        magic_name = st.selectbox("Magic", list(magic_options.keys()))
+        raw = st.text_area(t("notes_paste"), height=200)
     with col2:
-        keyword_color = st.color_picker("Keyword color (for AI Keywords)", "#ff0000")
+        if st.button("✨ " + t("notes_transform")):
+            if raw.strip():
+                st.session_state["note_content"] = format_note_with_coral_keywords(raw)
+            else:
+                st.warning("Nothing to transform.")
 
-    if st.button("Apply Magic"):
-        agent_id = magic_options[magic_name]
-        base_prompt = st.session_state["agents_cfg"]["agents"][agent_id]["system_prompt"]
-        if magic_name == "AI Keywords":
-            magic_prompt_suffix = f"""
-When returning keywords, identify the most important regulatory and technical
-keywords. Wrap each keyword in an HTML span with inline style using this color:
-{keyword_color}.
+    if not st.session_state["note_content"] and raw.strip():
+        # initialize if user typed but didn't click
+        st.session_state["note_content"] = format_note_with_coral_keywords(raw)
 
-Example:
-- <span style="color:{keyword_color};font-weight:bold;">predicate device</span>
-"""
-        else:
-            magic_prompt_suffix = ""
+    st.markdown("---")
+    st.markdown("#### 🔧 Note workspace")
 
-        full_prompt = base_prompt + "\n\n" + magic_prompt_suffix
+    model = st.selectbox(
+        t("notes_model"),
+        MODEL_OPTIONS,
+        index=MODEL_OPTIONS.index(st.session_state.get("global_model", MODEL_OPTIONS[0])),
+        key="notes_model_select",
+    )
 
-        agent_run_ui(
-            agent_id=agent_id,
-            tab_key=f"magic_{agent_id}",
-            default_prompt=full_prompt,
-            default_input_text=processed,
-            tab_label_for_history=f"Magic-{magic_name}",
+    view_mode = st.radio(
+        t("notes_view_mode"),
+        [t("view_markdown"), t("view_text")],
+        index=0 if st.session_state["note_view_mode"] == "markdown" else 1,
+        horizontal=True,
+    )
+    st.session_state["note_view_mode"] = "markdown" if view_mode == t("view_markdown") else "text"
+
+    if st.session_state["note_view_mode"] == "markdown":
+        edited = st.text_area(
+            "Markdown",
+            value=st.session_state["note_content"],
+            height=260,
         )
+        st.session_state["note_content"] = edited
+        st.markdown("---")
+        st.markdown("Preview:")
+        st.markdown(edited, unsafe_allow_html=True)
+    else:
+        text_view = st.text_area(
+            "Text",
+            value=st.session_state["note_content"],
+            height=260,
+        )
+        st.session_state["note_content"] = text_view
+
+    st.markdown("---")
+    st.markdown("#### 🪄 " + t("ai_magics"))
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🎯 " + t("magic_format")):
+            with st.spinner("Formatting note..."):
+                st.session_state["note_content"] = run_note_llm(
+                    llm_manager,
+                    st.session_state["note_content"],
+                    "format",
+                    model,
+                )
+        if st.button("🧠 " + t("magic_summary")):
+            with st.spinner("Summarizing note..."):
+                st.session_state["note_content"] = run_note_llm(
+                    llm_manager,
+                    st.session_state["note_content"],
+                    "summary",
+                    model,
+                )
+        if st.button("🌐 " + t("magic_translate")):
+            with st.spinner("Translating note..."):
+                st.session_state["note_content"] = run_note_llm(
+                    llm_manager,
+                    st.session_state["note_content"],
+                    "translate",
+                    model,
+                )
+    with col_b:
+        kw_str = st.text_input(t("keywords_input"), "")
+        kw_color = st.color_picker(t("keyword_color"), value="#FF7F50")  # coral default
+        if st.button("🔎 " + t("magic_keywords")):
+            kws = [k.strip() for k in kw_str.split(",") if k.strip()]
+            if not kws:
+                st.warning("No keywords entered.")
+            else:
+                with st.spinner("Highlighting keywords..."):
+                    st.session_state["note_content"] = run_note_llm(
+                        llm_manager,
+                        st.session_state["note_content"],
+                        "keywords",
+                        model,
+                        extra={"keywords": kws, "color": kw_color},
+                    )
+        if st.button("📈 " + t("magic_expand")):
+            with st.spinner("Expanding note..."):
+                st.session_state["note_content"] = run_note_llm(
+                    llm_manager,
+                    st.session_state["note_content"],
+                    "expand",
+                    model,
+                )
+        if st.button("✅ " + t("magic_actions")):
+            with st.spinner("Extracting action items..."):
+                st.session_state["note_content"] = run_note_llm(
+                    llm_manager,
+                    st.session_state["note_content"],
+                    "actions",
+                    model,
+                )
 
 
-# =========================
-# Main app
-# =========================
+# ------------- UTIL ----------------------------------------------------------
 
-st.set_page_config(page_title="FDA 510(k) Agentic Reviewer", layout="wide")
+def pd_timestamp_now():
+    # tiny helper without importing pandas at top-level
+    import pandas as _pd
+    return _pd.Timestamp.utcnow()
 
-# Initialize session state
-if "settings" not in st.session_state:
-    st.session_state["settings"] = {
-        "theme": "Light",
-        "language": "English",
-        "painter_style": "Van Gogh",
-        "model": "gpt-4o-mini",
-        "max_tokens": 12000,
-        "temperature": 0.2,
-    }
 
-if "history" not in st.session_state:
-    st.session_state["history"] = []
+# ------------- MAIN ----------------------------------------------------------
 
-# Load agents.yaml once
-if "agents_cfg" not in st.session_state:
-    try:
-        with open("agents.yaml", "r", encoding="utf-8") as f:
-            st.session_state["agents_cfg"] = yaml.safe_load(f)
-    except Exception as e:
-        st.error(f"Failed to load agents.yaml: {e}")
-        st.stop()
+def main():
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    init_session_state()
+    apply_theme()
 
-# Render sidebar (WOW UI + API keys)
-render_sidebar()
+    llm_manager = LLMProviderManager()
+    executor = AgentExecutor(llm_manager=llm_manager, agents_config=st.session_state["agents_config"])
 
-# Apply WOW painter style & theme CSS
-apply_style(st.session_state.settings["theme"], st.session_state.settings["painter_style"])
+    # Wrap main content for background CSS
+    st.markdown('<div class="main-wrapping-container">', unsafe_allow_html=True)
 
-# Tabs with localized labels
-lang = st.session_state.settings["language"]
-tab_labels = [
-    t("Dashboard"),
-    t("510k_tab"),
-    t("PDF → Markdown"),
-    t("Summary & Entities"),
-    t("Comparator"),
-    t("Checklist & Report"),
-    t("Note Keeper & Magics"),
-]
-tabs = st.tabs(tab_labels)
+    render_sidebar(llm_manager)
+    st.title(t("app_title"))
+    render_status_header(llm_manager)
 
-with tabs[0]:
-    render_dashboard()
-with tabs[1]:
-    render_510k_tab()
-with tabs[2]:
-    render_pdf_to_md_tab()
-with tabs[3]:
-    render_summary_tab()
-with tabs[4]:
-    render_diff_tab()
-with tabs[5]:
-    render_checklist_tab()
-with tabs[6]:
-    render_note_keeper_tab()
+    tabs = st.tabs([t("tab_agents"), t("tab_dashboard"), t("tab_notes")])
+
+    with tabs[0]:
+        render_agent_runner_tab(executor)
+    with tabs[1]:
+        render_dashboard_tab()
+    with tabs[2]:
+        render_note_keeper_tab(llm_manager)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+if __name__ == "__main__":
+    main()
